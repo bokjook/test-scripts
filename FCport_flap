@@ -1,0 +1,54 @@
+### Author:   Johnathan Wong
+
+### to flap the switch FC ports.
+
+import Configuration.configparser
+import commands
+import Library
+import time
+import Library.logger
+
+Logger = Library.logger.Logger
+logfile = Configuration.configparser.logfile
+
+def disable_port(switch_ip,username,password,interface):
+    cmd = 'Tools/port_disable.sh %s %s %s %s'%(switch_ip,username,password,interface)
+    Logger.info("command to toggle interface is %s"%cmd)
+    output = commands.getoutput(cmd)
+    Logger.info(output)
+    return True
+def enable_port(switch_ip,username,password,interface):
+    cmd = 'Tools/port_enable.sh %s %s %s %s'%(switch_ip,username,password,interface)
+    Logger.info("command to toggle interface is %s"%cmd)
+    output = commands.getoutput(cmd)
+    Logger.info(output)
+    return True
+
+
+def portflap():
+    """
+    This will perform port flap for FC switch interfaces.
+    :return:
+    """
+    Logger.info("About to perform port flap test")
+    fc_interfaces = Configuration.configparser.fc_int.strip().replace(" ",",")
+    Logger.info("fc_interface are:%s",fc_interfaces)
+    switch_ip = Configuration.configparser.fc_switch
+    flap_iteration = Configuration.configparser.iteration_path_failover
+    username = Configuration.configparser.fc_switch_username
+    password = Configuration.configparser.fc_switch_password
+    for iteration in flap_iteration:
+        Logger.info("Doing iteration %s for port flap"%iteration)
+        for interface in fc_interfaces.split(','):
+            Logger.info("Disabling port %s"%interface)
+            flag = disable_port(switch_ip,username,password,interface)
+            Logger.info("Waiting %s seconds per port flap wait time configured"%Configuration.configparser.wait_path_failover)
+            time.sleep(float(Configuration.configparser.wait_path_failover))
+            Logger.info("bringing interface %s UP."%interface)
+            flag = enable_port(switch_ip,username,password,interface)
+            Logger.info("Waiting %s seconds per port flap wait time configured"%Configuration.configparser.wait_path_failover)
+            time.sleep(float(Configuration.configparser.wait_path_failover)/2)
+    Logger.info("Port flap Test completed")
+
+
+
