@@ -1,0 +1,135 @@
+### Author:    Johnathan Wong
+
+
+import Configuration.configparser
+import json
+from pprint import pprint
+import Library.ssh_host
+import Library.logger
+import re
+
+Logger = Library.logger.Logger
+
+
+def verify_io_stress(ucs_info_filename, current_testname):
+    """
+    :param ucs_info_filename:
+    :param current_test:
+    :return:
+    """
+    Logger.info("***************************\n\nIn verify_io_stress: Arguments are %s,%s\n" % (
+    ucs_info_filename, current_testname))
+    Logger.info("Reading the ucs info file now, from io_stress function")
+    with open(ucs_info_filename) as ucs_info_handle:
+        ucs_info_dic = json.load(ucs_info_handle)
+        Logger.info("Printing the ucs_info_dic after reading from ucs_info.json")
+    with open(Configuration.configparser.logfile, 'a') as file_handle:
+        pprint(ucs_info_dic, file_handle)
+    result_file = ucs_info_filename.replace('ucsinfo', 'results').replace('json', 'csv')
+    Logger.info("results file is %s" % result_file)
+    fi = open(result_file, 'a')
+    dead_server_list = []
+
+    for blade, line in ucs_info_dic.iteritems():
+        serverips = line.split(';')[1]
+        serverip_list = serverips.split(',')
+        Logger.info("server ip's are :%s" % serverip_list)
+        Logger.info("Checking to see if atleast one of the server ips is reachable")
+        os_version = line.split(';')[4]
+        Logger.info("os_version on split is : %s" % os_version)
+        if "WIN" in os_version:
+            username = Configuration.configparser.win_username
+            password = Configuration.configparser.win_password
+        else:
+            username = Configuration.configparser.username
+            password = Configuration.configparser.password
+        for ip in serverip_list:
+            flag = Library.ssh_host.ssh_connect(ip, username, password)
+            if flag:
+                serverip = flag
+                break
+        cmd_output = ""        
+        if serverip:
+            Logger.info("server ip for IO Stress verificaton is:%s" % serverip)
+            os_version = line.split(';')[4]
+            Logger.info("os_version on split is : %s" % os_version)
+            excmd = "cd /var/tmp/;cat dtlog  |  grep 'Average transfer rates'"
+            if "WIN" in os_version:
+                ### Add windows IO stress verification code here
+                Logger.info("Perform windows iostress verification")
+                cmd = "c:\\UCSTools\\Operate.ps1 RunIO Results"
+                Logger.info("Windows getting the Through put values")
+                cmd_output = Library.ssh_host.ssh_execute_cmd(serverip, cmd, username, password)
+                Logger.info("cmd_ouput is:%s", cmd_output)
+            elif "ESX" in os_version:
+                Logger.info("Performing ESX IO stress verification ")
+                Logger.info("About to get VM IPs")
+                vmip_flag = Library.start_esx_vms.get_vm_ip(serverip)
+                if vmip_flag:
+                    Logger.info("VMIP for for server %s is %s:" % (serverip, vmip_flag))
+                    serverip = vmip_flag
+                    cmd_output = Library.ssh_host.ssh_execute_cmd(serverip, excmd)
+                    Logger.info("cmd_ouput for esx is:%s", cmd_output)
+                else:
+                    Logger.error("NO VM IP found for server %s" % serverip)
+            else:
+                Logger.info("For all linux and esx flavors ,getting the Through put values")
+                cmd_output = Library.ssh_host.ssh_execute_cmd(serverip, excmd)
+                Logger.info("cmd_ouput is:%s", cmd_output)
+            rate_list = []
+            if cmd_output:
+                for rate_line in cmd_output:
+                    Logger.info("rate line is %s" % rate_line)
+                    mo = re.search(r'Average transfer.*bytes/sec,\s+(\d+\.\d+)\s+Kbytes/sec', rate_line)
+                    if mo:
+                        rate = mo.group(1)
+                        Logger.info("rate is %s" % rate)
+                        rate_list.append(rate)
+                if len(rate_list) > 1:
+                    Logger.info("Sorted rate list is %s:", sorted(rate_list))
+                    # min_rate = sorted(rate_list)[0]
+                    Logger.info("Total throughput = sum of all the throughput values")
+                    min_rate = sum([float(i) for i in rate_list])
+                    Logger.info("lowest rate is:%s:" % min_rate)
+                    if float(min_rate) > float(Configuration.configparser.min_throughput):
+                        Logger.info("Through put rate %s KBps is above the min requirement of %sKBps" % (
+                        min_rate, Configuration.configparser.min_throughput))
+                        Logger.info("IO Stress test passed")
+                        result_input = '%s;%s;%s;verify_io_stress;%s KBps;passed \n' % (
+                        blade, line, current_testname, min_rate)
+                        Logger.info("results string is %s" % result_input)
+                        fi.write(result_input)
+                    else:
+                        Logger.info(
+                            "IO Stress test Failed.Found %s IO rate , Expected atleast %sKB/s to pass the test" % (
+                            min_rate, Configuration.configparser.min_throughput))
+                        result_input = '%s;%s;%s;verify_io_stress;%s KBps;failed \n' % (
+                        blade, line, current_testname, min_rate)
+                        Logger.info("results string is %s" % result_input)
+                        fi.write(result_input)
+                        dead_server_list.append(blade)
+                else:
+                    Logger.error(
+                        "NO match for IO rate found, may be the dtlog file is absend in the server or IO never started on the server"
+                        "check the server / dir for dt-linux , test-* ,dtlog files")
+                    result_input = '%s;%s;%s;verify_io_stress;0 Kbps;failed \n' % (blade, line, current_testname)
+                    Logger.info("results string is %s" % result_input)
+                    fi.write(result_input)
+                    dead_server_list.append(blade)
+            else:
+                Logger.error("Could not execute command on server %s:" % serverip)
+                assert ("Server ip not reachable or command o/p empty")
+                result_input = '%s;%s;%s;verify_io_stress;failed \n' % (blade, line, current_testname)
+                Logger.info("results string is %s" % result_input)
+                fi.write(result_input)
+                dead_server_list.append(blade)
+        else:
+            Logger.error("NO server reachable")
+            result_input = '%s;%s;%s;verify_io_stress;failed \n' % (blade, line, current_testname)
+            Logger.info("results string is %s" % result_input)
+            fi.write(result_input)
+            dead_server_list = dead_server_list.append(blade)
+
+    fi.close()
+    if dead_server_list:
+        Library.edit_ucsinfo_file.remove_blades(ucs_info_filename, dead_server_list)
