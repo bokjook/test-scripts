@@ -1,1 +1,1 @@
-Author:     Just a couple of Python test cases contributed to the automation test engine.
+Author:     Just a few of Python/shell test cases contributed to the automation test engine.
