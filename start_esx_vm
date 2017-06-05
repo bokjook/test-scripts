@@ -1,0 +1,325 @@
+import Configuration
+import commands
+import Library
+import re
+import os
+import Library.ssh_host
+import Library.logger
+import Configuration.configparser
+Logger = Library.logger.Logger
+logfile = Configuration.configparser.logfile
+import time
+
+def copy_vms(server_ip):
+    """
+    Copy redhat vm files to the ESX host.
+    :param server_ip:
+    :return:
+    """
+    flag = True
+    local_dir = Configuration.configparser.vm_dir
+    remote_dir = Configuration.configparser.esx_datastore + "/ESX4_RH/"
+    Logger.info("local dir is %s,remote_dir is %s"%(local_dir,remote_dir))
+    excmd = "ls /vmfs/volumes/ | grep datastore"
+    output = Library.ssh_host.ssh_execute_cmd(server_ip,excmd)
+    Logger.info("output is %s"%output)
+    if output:
+        if "datastore" in output[0]:
+            datastore = output[0].rstrip('\n')
+            Logger.info("datastore name is:%s"%datastore)
+            remote_dir = "/vmfs/volumes/" + datastore + "/ESX4_RH/"
+        else:
+            Logger.critical("No datastore found under /vmfs/volumes/ on server:%s"%server_ip)
+    else:
+        Logger.error("No o/p for command:%s on server:%s"%(excmd,server_ip))
+    excmd = "mkdir -p %s;rm -rf %s*"%(remote_dir,remote_dir)
+    output = Library.ssh_host.ssh_execute_cmd(server_ip,excmd)
+    Logger.info("flag is %s"%output)
+    flag = Library.ssh_host.copy_dir(server_ip,local_dir,remote_dir)
+    if flag == False:
+        assert "Could not copy the VMS"
+        Logger.critical("Could not copy vms to the server:%s"%server_ip)
+    else:
+        Logger.info ("Copied VM files to server %s"%server_ip)
+    return flag
+
+def start_vms(server_ip,os_version):
+    """
+    Execute the esx commands to start the redhat vm on ESX host.
+    :param server_ip:
+    :param os_version:
+    :return:True/False
+    """
+    datastore = Configuration.configparser.esx_datastore + "/ESX4_RH"
+    excmd = "ls /vmfs/volumes/ | grep datastore | head -1"
+    output = Library.ssh_host.ssh_execute_cmd(server_ip,excmd)
+    Logger.info("output is %s"%output)
+    if output:
+        if "datastore" in output[0]:
+            datastore = output[0].rstrip('\n')
+            Logger.info("datastore name is:%s"%datastore)
+            datastore = "/vmfs/volumes/" + datastore + "/ESX4_RH"
+        else:
+            Logger.critical("No datastore found under /vmfs/volumes/ on server:%s"%server_ip)
+    else:
+        Logger.error("No o/p for command:%s on server:%s"%(excmd,server_ip))
+    # start the VM
+    register_vm_cmd = " vim-cmd hostsvc/maintenance_mode_exit;" \
+                       "vim-cmd solo/registervm %s/ESX4_RH.vmx;" \
+                       "sleep 60;"%datastore
+    Logger.info("Cmd to register the VM is %s"%register_vm_cmd)
+    register_vm_output = Library.ssh_host.ssh_execute_cmd(server_ip,register_vm_cmd)
+    Logger.info("register vm output is %s",register_vm_output)
+    flag = poweron_vm(server_ip)
+    if flag:
+        Logger.info("VM up and running on %s"%server_ip)
+    else:
+        Logger.error("Could not powered ON vm on %s"%server_ip)
+        flag = False
+    return flag
+
+def get_vmid(server_ip):
+    """
+    :param serverip:
+    :return: vmid
+    """
+    get_vmid_cmd = "vim-cmd vmsvc/getallvms|grep ESX4_RH|cut -c-3"
+    vmid = Library.ssh_host.ssh_execute_cmd(server_ip,get_vmid_cmd)
+    Logger.info("VMID is %s"%vmid)
+    flag = False
+    if vmid:
+        vmid_string = vmid[0].rstrip('\n')
+        Logger.info("VMID is %s"%vmid_string)
+        flag = vmid_string
+    return flag
+
+def get_vm_ip(server_ip):
+    """
+    Executes the esx commands on the host to get the quest VM IPs.
+    :param server_ip: This is the host ip
+    :return: the VM ip address
+    """
+    cmd = "vim-cmd vmsvc/getallvms |  grep ESX4_RH  | awk '{print $1}'"
+    vmid_output =  Library.ssh_host.ssh_execute_cmd(server_ip,cmd)
+    Logger.info("vmid_output  is :%s",vmid_output)
+    vimdump_output = []
+    if vmid_output:
+        vmid = vmid_output[0].strip()
+        Logger.info( "vmid is :%s:"%vmid)
+        cmd = "vim-cmd vmsvc/get.guest %s |grep -m 1 \"ipAddress = \""%vmid
+        vimdump_output =  Library.ssh_host.ssh_execute_cmd(server_ip,cmd)
+        Logger.info("vim-dump  is %s",vimdump_output)
+    vmip = False
+    for line in vimdump_output:
+        Logger.info("vimdump o/p ,line is %s "%line)
+        mo = re.search(r'(\d{1,3}.){3}\d{1,3}',line)
+        if mo:
+            vmip = mo.group(0)
+            Logger.info("VM IP on server %s is %s"%(server_ip,vmip))
+            break
+    Logger.info("vmip is:%s:"%vmip)
+    return vmip
+
+def check_vm_present(esx_host_ip):
+    """
+    This method checks if already ucs_vm is present or not.
+    If present then do cleanup of ucs_vm to create new one.
+    """
+    Logger.info("In check_ucs_vm_present , esx host ip is:%s"%esx_host_ip)
+    cmd = "vim-cmd vmsvc/getallvms"
+    flag = False
+    # Execute the cmd.
+    cmd_output = Library.ssh_host.ssh_execute_cmd(esx_host_ip,cmd)
+    Logger.info("return value of cmd is %s"%cmd_output)
+    # Check in output if it has ucs_vm present.
+    for line in cmd_output[1:]:
+        Logger.info("get_all_vms o/p line is %s"%line.strip())
+        mo = re.match("^(\d+)\s+(ESX4_RH)\s+(.*?)",line.strip())
+        if mo:
+            vm_id = mo.group(1)
+            Logger.info("ucs_vm is present in ESX %s ,vmid is %s"%(esx_host_ip,vm_id))
+            flag = vm_id
+    Logger.info ("return flag is %s"%flag)
+    return flag
+
+def get_esx_vm_status(esx_host_ip,vm_id):
+    '''
+    Power on/off status of VM.
+    @param: vm_id  - ID of VM
+    @type : String
+    @return : "on" or "off" String
+    @type : String
+    '''
+    Logger.info(" : Getting VM status...for esx host %s with vm id %s"%(esx_host_ip,vm_id))
+    # ESX Command to check power status
+    cmd = "vim-cmd vmsvc/power.getstate " + vm_id
+    Logger.info("power state cmd is: %s"%cmd)
+    # Execute the cmd.
+    output = Library.ssh_host.ssh_execute_cmd(esx_host_ip,cmd)
+    # return error if command execution failed
+    for line in output:
+        if 'Powered on' in line.strip():
+            Logger.info(esx_host_ip+" : The VM is in ON State.")
+            return "on"
+        elif 'Powered off' in line.strip():
+            Logger.info(esx_host_ip+" : The VM is in OFF State.")
+            return "off"
+
+def check_vmdk_present(esx_host_ip):
+    """
+    Execute the esx commands to start the redhat vm on ESX host.
+    :param server_ip:
+    :param os_version:
+    :return:True/False
+    """
+    excmd = "ls /vmfs/volumes/ | grep datastore | head -1"
+    output = Library.ssh_host.ssh_execute_cmd(esx_host_ip,excmd)
+    Logger.info("output is %s"%output)
+    if output:
+        if "datastore" in output[0]:
+            datastore = output[0].rstrip('\n')
+            Logger.info("datastore name is:%s"%datastore)
+            datastore = "/vmfs/volumes/" + datastore + "/ESX4_RH"
+            Logger.info("checking if vmdk and vmx files exist on this server: %s"%esx_host_ip)
+            cmd = "ls %s |  grep 'ESX4_RH' "%datastore
+            output = Library.ssh_host.ssh_execute_cmd(esx_host_ip,cmd)
+            file_count=0
+            for line in output:
+                if (re.search("(ESX4_RH.vmdk)$",line)) or (re.search("(ESX4_RH-flat.vmdk)$",line)) or (re.search("(ESX4_RH.vmx)$",line)):
+                    file_count += 1
+                    Logger.info("Count is = %s"%file_count)
+            if file_count >= 3:
+                Logger.info("All vm files exits on this server %s"%(esx_host_ip))
+                return True
+            else:
+                Logger.info("All VM files does not exists in server  %s , need to copy vm dir to server"%esx_host_ip)
+                return False
+        else:
+            Logger.critical("No datastore found under /vmfs/volumes/ on server:%s"%esx_host_ip)
+            return False
+    else:
+        Logger.error("No o/p for command:%s on server:%s"%(excmd,esx_host_ip))
+        return False
+
+
+def poweron_vm(esxhost_ip):
+    """
+    Execute the esx commands to start the redhat vm on ESX host.
+    :param server_ip:
+    :return:True/False
+    """
+    Logger.info("getting vmid for server %s"%esxhost_ip)
+    vm_id = get_vmid(esxhost_ip)
+    if vm_id:
+        poweron_vm_cmd = " vim-cmd hostsvc/maintenance_mode_exit;vim-cmd vmsvc/power.on " + str(vm_id)
+        vmid_output = Library.ssh_host.ssh_execute_cmd(esxhost_ip,poweron_vm_cmd)
+        Logger.info("VM power ON command output is %s",vmid_output)
+        return vmid_output
+    else:
+        Logger.error("vmid returned is %s"%vm_id)
+        return False
+
+def poweroff_vm(esxhost_ip):
+    """
+    Execute the esx commands to turn OFF the redhat vm on ESX host.
+    :param server_ip:
+    :return:True/False
+    """
+    Logger.info("getting vmid for server %s"%esxhost_ip)
+    vm_id = get_vmid(esxhost_ip)
+    if vm_id:
+        poweroff_vm_cmd = "vim-cmd vmsvc/power.off " + str(vm_id)
+        vmid_output = Library.ssh_host.ssh_execute_cmd(esxhost_ip,poweroff_vm_cmd)
+        Logger.info("VM power OFF command output is %s",vmid_output)
+        return vmid_output
+    else:
+        Logger.error("vmid returned is %s"%vm_id)
+        return False
+
+def vm_on_host(ip_list, oses_list):
+    """
+    :param ip_list:  server ip list
+    :param oses_list:  coreesponding os version list
+    :return:
+    """
+    for ip, oses in zip(ip_list, oses_list):
+        if "ESX" in oses:
+            Logger.info("checking to see if the esx host %s has RHEL VM already copied"%ip)
+            flag = check_vmdk_present(ip)
+            if not flag:
+                Logger.info("About to copy and start RHEL VM to the ESX host")
+                flag = copy_vms(ip)
+                Logger.info("Flag is  %s" % flag)
+            else:
+                Logger.info("vm file already present in esx host %s"%ip)
+    vm_poweredoff_flag = False
+    for ip, oses in zip(ip_list, oses_list):
+        if "ESX" in oses:
+            Logger.info("checking if the ESX4_RH vm already has a vm_id on server %s"%ip)
+            flag = check_vm_present(ip)
+            Logger.info("flag on vm id check is %s"%flag)
+            if flag:
+                vm_id = flag
+                Logger.info("vm_id already present :%s,checking vm is powered on/off now"%vm_id)
+                vm_status = get_esx_vm_status(ip,vm_id)
+                Logger.info("flag returned is %s"%vm_status)
+                if "on" in vm_status:
+                    Logger.info("vm with vm_id %s is already powered ON on the esx host %s"%(vm_id,ip))
+                else:
+                    Logger.info("About to power ON VM")
+                    flag_start_vms = poweron_vm(ip)
+                    vm_poweredoff_flag = True
+                    Logger.info(" start_vms is cmd output is: %s \n" % flag_start_vms)
+            else:
+                # Start vms
+                Logger.info("About the register and start VMS")
+                flag_start_vms = start_vms(ip, oses)
+                Logger.info(" start_vms is %s \n" % flag_start_vms)
+                vm_poweredoff_flag = True
+
+    for oses in oses_list:
+        if "ESX" in oses and vm_poweredoff_flag is True:
+            Logger.info("sleeping for 3 min for esx vm to power on and pickup the ip address from dhcp server.")
+            time.sleep(180)
+            break
+    return True
+
+def copy_dt(ip_list,oses_list):
+    """
+    :param ip_list:
+    :param oses_list:
+    :return:
+    """
+    for ip,oses in zip(ip_list,oses_list):
+        Logger.info("Printing ip and os :ip=%s, os=%s"%(ip,oses))
+        if "WIN" in oses or "ESX" in oses:
+            Logger.info("Windows  and ESX VM has DT in it.")
+        else:
+            Logger.info("For all linux  ,starting to copy the DT executable to /var/tmp dir .")
+            current_dir = commands.getoutput("pwd")
+            dt_path = current_dir + "/Tools/DT/"
+            dt_file = current_dir + "/Tools/DT/dt-linux"
+            Logger.info("Looking for Dt in path %s:"%dt_path)
+            if os.path.isfile(dt_file):
+                Logger.info("checking if the server already has linux-dt")
+                cmd_output = Library.ssh_host.ssh_execute_cmd(ip,"ls /var/tmp/dt-linux")
+                dt_present = False
+                if cmd_output:
+                    if "dt-linux" in cmd_output[0].strip():
+                        Logger.info("dt-linux already present in the server %s"%ip)
+                        dt_present = True
+                if not dt_present:
+                    Logger.info("About to copy dt to server %s"%ip)
+                    flag = Library.ssh_host.execute_scp(ip,dt_file,"/var/tmp/")
+                    Logger.info("return flag is %s"%flag)
+                    if flag == False:
+                        assert "Could not copy dt to server"
+                Logger.info("settting exe permission for dt-linux")
+                cmd = "chmod 777 /var/tmp/dt-linux"
+                cmd_output = Library.ssh_host.ssh_execute_cmd(ip,cmd)
+            else:
+                Logger.critical("Could not find DT for linux")
+
+
+    return True
+    
